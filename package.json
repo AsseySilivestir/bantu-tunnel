@@ -1,0 +1,33 @@
+{
+  "name": "bantu-tunnel",
+  "version": "1.0.0",
+  "description": "A self-hosted tunnel server (like ngrok/localtunnel) deployable on Render. Expose your local dev server to the public internet via your own tunnel service.",
+  "main": "server.js",
+  "bin": {
+    "bantu-tunnel-server": "./server.js",
+    "bantu-tunnel": "./client.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "client": "node client.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "keywords": [
+    "tunnel",
+    "ngrok",
+    "localtunnel",
+    "expose",
+    "reverse-proxy",
+    "render",
+    "bantu",
+    "websocket",
+    "self-hosted"
+  ],
+  "license": "MIT"
+}

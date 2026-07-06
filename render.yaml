@@ -1,0 +1,40 @@
+# Render deployment config for the Bantu Tunnel server.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Quick deploy:
+#   1. Push this folder to a GitHub repo.
+#   2. In Render dashboard: New -> Blueprint -> pick the repo.
+#   3. Render will detect this render.yaml and create the service for you.
+#
+# Or use the "Web Service" route manually with these settings:
+#   - Environment: Node
+#   - Build Command: npm install
+#   - Start Command: node server.js
+#   - Plan: Free (or Starter for always-on)
+
+services:
+  - type: web
+    name: bantu-tunnel
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    rootDir: .
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 18.18.0
+      # Path mode is the default — works on Render's free *.onrender.com domain.
+      # Leave BASE_DOMAIN empty to keep path mode.
+      # Optional shared secret — if set, clients must pass --token <value>.
+      - key: AUTH_TOKEN
+        sync: false   # set manually in the Render dashboard if you want auth
+      # To enable subdomain mode (https://<tunnel>.tunnels.example.com),
+      # set BASE_DOMAIN and add a wildcard CNAME: *.tunnels.example.com -> <app>.onrender.com
+      - key: BASE_DOMAIN
+        sync: false
+      - key: MAX_TUNNELS
+        value: '200'
