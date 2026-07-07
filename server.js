@@ -36,8 +36,13 @@ const MAX_TUNNELS = parseInt(process.env.MAX_TUNNELS || '200', 10);
 const SUBDOMAIN_MODE = Boolean(BASE_DOMAIN);
 const REQUEST_TIMEOUT_MS = 60_000;                        // per-request timeout
 
-// tunnelId -> { ws, pending: Map<requestId, {res, timer}>, createdAt, requests }
+// tunnelId -> { ws, pending: Map<requestId, {res, timer}>, createdAt, requests, customDomains: Set<string> }
 const tunnels = new Map();
+
+// customDomain (lowercase) -> tunnelId
+// Populated when a client sends { type: 'bind-domain', domain: 'splannes.co.tz' }
+// Used by resolveTunnelIdFromReq to route requests by Host header
+const customDomainMap = new Map();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -60,8 +65,16 @@ function publicUrlFor(tunnelId, req) {
 }
 
 function resolveTunnelIdFromReq(req) {
+  // 1. Custom-domain mode: check the Host header against customDomainMap.
+  //    This lets a user point splannes.co.tz at this Render service and have
+  //    it route to their tunnel — no Cloudflare, no subdomain mode required.
+  //    Works in BOTH path mode and subdomain mode.
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+  if (host && customDomainMap.has(host)) {
+    return customDomainMap.get(host);
+  }
+
   if (SUBDOMAIN_MODE) {
-    const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
     const root = (BASE_DOMAIN || '').toLowerCase();
     if (host.endsWith('.' + root)) {
       return host.slice(0, -(root.length + 1));
@@ -75,6 +88,12 @@ function resolveTunnelIdFromReq(req) {
 }
 
 function rewritePathForClient(req, tunnelId) {
+  // If the request came in via a custom domain (Host matches customDomainMap),
+  // pass the URL through as-is — the local app should see its real domain.
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+  if (host && customDomainMap.has(host) && customDomainMap.get(host) === tunnelId) {
+    return req.url;
+  }
   if (SUBDOMAIN_MODE) return req.url;
   // Strip the /t/<tunnelId> prefix so the local app sees the real path
   const parsed = url.parse(req.url);
@@ -311,6 +330,7 @@ wss.on('connection', (ws, req) => {
     pending: new Map(),
     createdAt: Date.now(),
     requests: 0,
+    customDomains: new Set(),  // domains bound to this tunnel
   };
   tunnels.set(tunnelId, tunnel);
 
@@ -349,6 +369,50 @@ wss.on('connection', (ws, req) => {
       } catch (e) {
         // Socket may have already closed
       }
+    } else if (msg.type === 'bind-domain') {
+      // ── Custom domain binding ──
+      // Client asks the server to route a custom domain (e.g. splannes.co.tz)
+      // to this tunnel. The user must have already:
+      //   1. Added the custom domain in Render dashboard (for HTTPS)
+      //   2. Added a CNAME record at their registrar pointing at this service
+      // The server just stores the mapping so resolveTunnelIdFromReq() can
+      // route incoming requests by Host header.
+      const rawDomain = String(msg.domain || '').trim().toLowerCase();
+      if (!rawDomain) {
+        ws.send(JSON.stringify({ type: 'error', message: 'bind-domain: missing domain' }));
+        return;
+      }
+      // Basic validation — must look like a domain (at least one dot, valid chars)
+      if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(rawDomain)) {
+        ws.send(JSON.stringify({ type: 'error', message: `bind-domain: invalid domain '${rawDomain}'` }));
+        return;
+      }
+      // Check if another tunnel already owns this domain
+      const existingOwner = customDomainMap.get(rawDomain);
+      if (existingOwner && existingOwner !== tunnelId) {
+        ws.send(JSON.stringify({ type: 'error', message: `bind-domain: '${rawDomain}' is already bound to another tunnel` }));
+        return;
+      }
+      customDomainMap.set(rawDomain, tunnelId);
+      tunnel.customDomains.add(rawDomain);
+      console.log(`[tunnel] ${tunnelId} bound domain: ${rawDomain}`);
+      ws.send(JSON.stringify({
+        type: 'domain-bound',
+        domain: rawDomain,
+        url: `https://${rawDomain}`,
+        message: `Domain ${rawDomain} is now bound to tunnel ${tunnelId}. ` +
+                 `Make sure you added it in Render dashboard and pointed DNS at this service.`,
+      }));
+    } else if (msg.type === 'unbind-domain') {
+      const rawDomain = String(msg.domain || '').trim().toLowerCase();
+      if (customDomainMap.get(rawDomain) === tunnelId) {
+        customDomainMap.delete(rawDomain);
+        tunnel.customDomains.delete(rawDomain);
+        console.log(`[tunnel] ${tunnelId} unbound domain: ${rawDomain}`);
+        ws.send(JSON.stringify({ type: 'domain-unbound', domain: rawDomain }));
+      } else {
+        ws.send(JSON.stringify({ type: 'error', message: `unbind-domain: '${rawDomain}' not bound to this tunnel` }));
+      }
     } else if (msg.type === 'ping') {
       ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
     }
@@ -356,6 +420,14 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     tunnels.delete(tunnelId);
+    // Clean up any custom domain bindings owned by this tunnel
+    for (const d of tunnel.customDomains) {
+      if (customDomainMap.get(d) === tunnelId) {
+        customDomainMap.delete(d);
+        console.log(`[tunnel] domain ${d} unbound (tunnel ${tunnelId} closed)`);
+      }
+    }
+    tunnel.customDomains.clear();
     console.log(`[tunnel] - ${tunnelId} (closed, ${tunnel.pending.size} pending)`);
 
     for (const [, p] of tunnel.pending) {
